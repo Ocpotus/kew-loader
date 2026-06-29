@@ -1,0 +1,46 @@
+# URI examples: "neo4j://localhost", "neo4j+s://xxx.databases.neo4j.io"
+URI = "neo4j://localhost"
+AUTH = ("neo4j", "secretgraph")
+
+with GraphDatabase.driver(URI, auth=AUTH) as driver:
+    pass
+    driver.verify_connectivity()
+    print("Connection established.")
+    summary = driver.execute_query("""
+        CREATE (a:Person {name: $name})
+        CREATE (b:Person {name: $friendName})
+        CREATE (a)-[:KNOWS]->(b)
+        """,
+        name="Alice", friendName="David",
+        database_="neo4j",
+    ).summary
+    print("Created {nodes_created} nodes in {time} ms.".format(
+        nodes_created=summary.counters.nodes_created,
+        time=summary.result_available_after
+    ))
+
+    records, summary, keys = driver.execute_query("""
+        MATCH (p:Person)-[:KNOWS]->(:Person)
+        RETURN p.name AS name
+        """,
+        database_="neo4j",
+    )
+
+    # Loop through results and do something with them
+    for record in records:
+        print(record.data())  # get record as dict
+
+    # Summary information
+    print("The query `{query}` returned {records_count} records in {time} ms.".format(
+        query=summary.query, records_count=len(records),
+        time=summary.result_available_after
+    ))
+
+
+    connection = sqlite3.connect("kew-db.db")
+    cursor = connection.cursor()
+    cursor.execute("""CREATE TABLE IF NOT EXISTS urls(
+        url TEXT PRIMARY KEY NOT NULL
+        )""")
+    connection.commit()
+    connection.close()

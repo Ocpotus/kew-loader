@@ -1,0 +1,20 @@
+1. kew-db: Create a graph database with neo4j that represents all the songs, albums, artists, etc. installed
+	NODES: (artist, {name, genre})
+	       (song, {title, duration, number})
+	       (album, {title, release})
+	EDGES: (song -> album, member),
+	       (album -> song, contains),
+	       (artist -> song, author),
+	       (artist -> song, featured),
+	       (artist -> album, wrote)
+2. kew-installer: Create an installer
+	LIBRARIES: yt_dlp
+		   argparse
+		   neo4j
+		   sqlite3
+	USAGE:
+		kew-install args
+		checks if url in sqlite3 db
+		if in db continue; not end;
+		for each downloaded song get data from it create entry in neo4j
+		use sym-links
