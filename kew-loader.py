@@ -98,14 +98,19 @@ if __name__ == "__main__":
 
     if not root_is_artist:
         graph.connection.cypher("""
-                             MERGE (a:Artist {name: $name})
-                             MERGE (b:Album {title: $title})
-                             ON CREATE SET b.title = $title
+                                MERGE (b:Album {title: $title})
+                                ON CREATE SET b.title = $title
+                                """,
+                                {"title": nodes["album"]})
 
-                             CREATE (a)-[:WROTE]->(b)
-                             CREATE (b)-[:WRITTEN_BY]->(a)
-                             """,
-                             {"name": nodes["artist"], "title": nodes["album"]})
+        graph.connection.cypher("""
+                                MERGE (a:Artist {name: $name})
+                                MERGE (b:Album {title: $title})
+
+                                CREATE (a)-[:WROTE]->(b)
+                                CREATE (b)-[:WRITTEN_BY]->(a)
+                                """,
+                                {"name": nodes["artist"], "title": nodes["album"]})
 
     for song in nodes["songs"]:
         if root_is_artist:
@@ -125,22 +130,33 @@ if __name__ == "__main__":
                                     CREATE (b)-[:TRACK]->(s)
                                     CREATE (s)-[:TRACK_OF]->(b)
                                     """,
-                                    {"title": nodes["album"], "url": song["url"]})
+                                    {"url": song["url"], "title": nodes["album"]})
 
-        for artist in [a for a in song["artists"] if a != nodes["artist"]]:
-            graph.connection.cypher("""
-                                    MERGE (s:Song {url: $url})
-                                    MERGE (a:Artist {name: $name})
-
-                                    CREATE (s)-[:FEATURES]->(a)
-                                    CREATE (a)-[:FEATURED]->(s)
-                                    """,
-                                    {"url": song["url"], "name": artist})
-
+        print(len(song["artists"]))
+        graph.connection.cypher("""
+                               UNWIND $names as artist_name
+                               MERGE (a:Artist {name: artist_name})
+                               ON CREATE SET a.name = artist_name
+                               """,
+                               song["artists"])
 
     results = graph.connection.cypher("""
-                                      MATCH ()-[r]-()
-                                      return r
+                                      MATCH (a:Song)
+                                      return a
+                                      """)
+    for row in results:
+        print(f"{row}")
+
+    results = graph.connection.cypher("""
+                                      MATCH (a:Album)
+                                      return a
+                                      """)
+    for row in results:
+        print(f"{row}")
+
+    results = graph.connection.cypher("""
+                                      MATCH (a:Artist)
+                                      return a
                                       """)
     for row in results:
         print(f"{row}")
