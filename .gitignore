@@ -1,0 +1,7 @@
+# Git
+*
+!.gitignore
+
+# Forge
+!*.py
+!requirements.txt

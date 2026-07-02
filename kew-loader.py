@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse
-import re
-import sqlite3
-from graphqlite import Graph
+from pathlib import Path
 import yt_dlp
-import shutil
+import sys
+from redislite.falkordb_client import FalkorDB
 
-KEW_MUSIC_DIRECTORY = "~/Music/"
-KEW_INSTALL_DIRECTORY = "/tmp/kew-loader/"
-KEW_DB = "kew-db.db"
+KEW_MUSIC_DIRECTORY = "~/Music"
+KEW_DOWNLOAD_DIRECTORY = "/tmp/kew-loader"
+KEW_DB = ".kew.db"
+
 
 if __name__ == "__main__":
     # Set up argument parser
@@ -30,17 +30,17 @@ if __name__ == "__main__":
     print(f"Downloading music from {args.url}")
 
     ytdl_opts = {
-        'extract_flat': True,  # Equivalent to --flat-playlist
-        'skip_download': True, # Do not download the media files
-        'quiet': True, # No output
+        "extract_flat": True,
+        "skip_download": True,
+        "quiet": True,
     }
 
     with yt_dlp.YoutubeDL(ytdl_opts) as ytdl:
         info = ytdl.extract_info(args.url, download=False)
-        
-        if 'entries' in info:
-            for entry in info['entries']:
-                sources.append(entry)
+
+        if "entries" in info:
+            for entry in info["entries"]:
+                sources.append(entry["url"])
 
             nodes["album"] = info["title"]
             nodes["album"] = nodes["album"].replace("Album - ", "")
@@ -48,115 +48,124 @@ if __name__ == "__main__":
             urls.append(info)
 
     ytdl_opts = {
-        # Extract the best quality audio
-        'format': 'bestaudio/best',
-        'quiet': True, # No output
-        'no-warnings': True,
-        
-        # Convert to mp3 or m4a using FFmpeg
-        'postprocessors': [
+        "format": "bestaudio/best",
+        "quiet": True, # No output
+        "no-warnings": True,
+        "postprocessors": [
             {
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
             },
-            # This postprocessor writes metadata tags (Artist, Album, etc.) directly into the file
             {
-                'key': 'FFmpegMetadata',
-                'add_metadata': True,
+                "key": "FFmpegMetadata",
+                "add_metadata": True,
             }
         ],
-        # Name the file nicely based on track/title
-        'outtmpl': f"{KEW_INSTALL_DIRECTORY}%(title)s.%(ext)s",
+        "outtmpl": f"{KEW_DOWNLOAD_DIRECTORY}%(title)s.%(ext)s",
     }
 
-    graph = Graph(KEW_DB)
+    db_client = FalkorDB(str(Path(f"{KEW_MUSIC_DIRECTORY}/{KEW_DB}").expanduser()))
+    graph = db_client.select_graph("music")
 
+    # Filter out already added songs
+    result = graph.query("""
+                         UNWIND $urls as url
+                         MATCH (s:Song {url: url})
+                         RETURN s
+                         """, params={"urls": sources})
+
+    to_add = list(set(sources) - set([r[0].properties["url"] for r in result.result_set]))
+    
+    if len(to_add) == 0:
+        print("All songs are already in Music library...", file=sys.stderr)
+        sys.exit()
+    
     with yt_dlp.YoutubeDL(ytdl_opts) as ytdl:
-        for i, source in enumerate(sources):
-            results = graph.connection.cypher(
-                    "MATCH (s:Song {url: $url}) RETURN s LIMIT 1",
-                    {"url": source["url"]}
-                    )
+        for url in to_add:
+                info = ytdl.extract_info(url, download=False)
 
-            if len(results) == 0:
-                info = ytdl.extract_info(source['url'], download=False)
-                nodes["artist"] = info["artist"] if nodes["artist"] is None else nodes["artist"]
+                if nodes["artist"] is not None:
+                    if nodes["artist"] not in info["artist"].split(","):
+                        nodes["artist"] = "Various Artists"
+                else:
+                    nodes["artist"] = info["channel"]
+
                 nodes["songs"].append({
                     "title": info["title"],
-                    "url": source["url"],
-                    "artists": info["artists"],
+                    "url": url,
+                    "features": [a for a in info["artists"] if a != nodes["artist"]],
                 })
+    # Test out
+    for song in nodes["songs"]:
+        f_path = Path(f"{KEW_DOWNLOAD_DIRECTORY}/{song["title"]}.mp3")
+        f_path.touch()
 
-    root_is_artist = True if nodes["album"] is None else False
+    # Create graph representation
+    if nodes["album"] is None:
+        result = graph.query("""
+                             MERGE (a:Artist {name: $artist})
+                             WITH a
+                             UNWIND $urls AS url
+                             MERGE (s:Song {url: url})
+                             MERGE (s)-[:WRITTEN_BY]->(a)
+                             MERGE (a)-[:WROTE]->(s)
+                             """,
+                             params={
+                                 "artist": nodes["artist"],
+                                 "urls": [i["url"] for i in nodes["songs"]]
+                                 }
+                             )
+    else:
+        result = graph.query("""
+                             MERGE (a:Artist {name: $artist})
+                             MERGE (b:Album {title: $album})
+                             MERGE (a)-[:WROTE]->(b)
+                             MERGE (b)-[:WRITTEN_BY]->(a)
+                             WITH a, b
+                             UNWIND $urls AS url
+                             MERGE (s:Song {url: url})
+                             MERGE (b)-[:TRACK]->(s)
+                             MERGE (s)-[:TRACK_OF]->(b)
+                             """,
+                             params={
+                                "artist": nodes["artist"],
+                                "album": nodes["album"],
+                                "urls": [i["url"] for i in nodes["songs"]]
+                                }
+                             )
 
-    graph.connection.cypher("""
-                         MERGE (a:Artist {name: $name})
-                         ON CREATE SET a.name = $name
+    result = graph.query("""
+                         UNWIND $songs AS song
+                         MATCH (s:Song {url: song.url})
+                         WITH s, song.features AS features 
+
+                         UNWIND features AS feature
+                         MERGE (a:Artist {name: feature})
+
+                         MERGE (a)-[:FEATURED]->(s)
+                         MERGE (s)-[:FEATURES]->(a)
                          """,
-                         {"name": nodes["artist"]})
+                         params={
+                             "songs": nodes["songs"],
+                            }
+                         )
 
-    if not root_is_artist:
-        graph.connection.cypher("""
-                                MERGE (b:Album {title: $title})
-                                ON CREATE SET b.title = $title
-                                """,
-                                {"title": nodes["album"]})
+    db_client.close()
 
-        graph.connection.cypher("""
-                                MERGE (a:Artist {name: $name})
-                                MERGE (b:Album {title: $title})
-
-                                CREATE (a)-[:WROTE]->(b)
-                                CREATE (b)-[:WRITTEN_BY]->(a)
-                                """,
-                                {"name": nodes["artist"], "title": nodes["album"]})
+    artist_dir = Path(f"{KEW_MUSIC_DIRECTORY}/{nodes["artist"]}/{nodes["album"]}").expanduser()
+    artist_dir.mkdir(parents=True, exist_ok=True)
 
     for song in nodes["songs"]:
-        if root_is_artist:
-            graph.connection.cypher("""
-                                    MERGE (a:Artist {name: $name})
-                                    CREATE (s:Song {url: $url})
+        # Move installed file to proper Artist subdir
+        source = Path(f"{KEW_DOWNLOAD_DIRECTORY}/{song["title"]}.mp3").expanduser()
+        destination = Path(f"{KEW_MUSIC_DIRECTORY}/{nodes["artist"]}/{nodes["album"]}/{song["title"]}.mp3").expanduser()
+        destination.touch()
+        source.replace(destination)
 
-                                    CREATE (a)-[:WROTE]->(s)
-                                    CREATE (s)-[:WRITTEN_BY]->(a)
-                                    """,
-                                    {"name": nodes["artist"], "url": song["url"]})
-        else:
-            graph.connection.cypher("""
-                                    MERGE (b:Album {title: $title})
-                                    CREATE (s:Song {url: $url})
-
-                                    CREATE (b)-[:TRACK]->(s)
-                                    CREATE (s)-[:TRACK_OF]->(b)
-                                    """,
-                                    {"url": song["url"], "title": nodes["album"]})
-
-        print(len(song["artists"]))
-        graph.connection.cypher("""
-                               UNWIND $names as artist_name
-                               MERGE (a:Artist {name: artist_name})
-                               ON CREATE SET a.name = artist_name
-                               """,
-                               song["artists"])
-
-    results = graph.connection.cypher("""
-                                      MATCH (a:Song)
-                                      return a
-                                      """)
-    for row in results:
-        print(f"{row}")
-
-    results = graph.connection.cypher("""
-                                      MATCH (a:Album)
-                                      return a
-                                      """)
-    for row in results:
-        print(f"{row}")
-
-    results = graph.connection.cypher("""
-                                      MATCH (a:Artist)
-                                      return a
-                                      """)
-    for row in results:
-        print(f"{row}")
+        # Create symlink
+        for artist in song["features"]:
+            dir = Path(f"{KEW_MUSIC_DIRECTORY}/{artist}/").expanduser()
+            dir.mkdir(parents=True, exist_ok=True)
+            link = Path(f"{KEW_MUSIC_DIRECTORY}/{artist}/{song["title"]}.mp3").expanduser()
+            link.symlink_to(destination)
